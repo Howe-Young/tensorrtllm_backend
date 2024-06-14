@@ -78,10 +78,6 @@ python ${fill_template} --in_place ${ensemble_config_path} \
 python ${fill_template} --in_place ${bls_config_path} \
   triton_max_batch_size:${triton_max_batch_size},decoupled_mode:False,bls_instance_count:1,accumulate_tokens:False
 
-python tensorrtllm_backend/scripts/launch_triton_server.py --model_repo ${triton_model_dir}
-
-python tensorrtllm_backend/tools/internlm_xcomposer2/client.py --text "Please describe this image in detail." --request-output-len 200
-
 ```
 
 ## Step 2. Launch triton server
