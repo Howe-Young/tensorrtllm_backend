@@ -25,11 +25,16 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 import json
+import os
 from typing import List
 
 import numpy as np
+import tensorrt as trt
+import torch
 import triton_python_backend_utils as pb_utils
 from transformers import AutoTokenizer, T5Tokenizer
+
+# from tensorrt_llm.runtime import Session, TensorInfo
 
 
 class TritonPythonModel:
@@ -56,6 +61,10 @@ class TritonPythonModel:
         model_config = json.loads(args['model_config'])
         tokenizer_dir = model_config['parameters']['tokenizer_dir'][
             'string_value']
+        vit_model_path = model_config['parameters']['vit_model_dir'][
+            'string_value']
+        gpt_model_path = model_config['parameters']['gpt_model_path'][
+            'string_value']
 
         add_special_tokens = model_config['parameters'].get(
             'add_special_tokens')
@@ -79,8 +88,6 @@ class TritonPythonModel:
             self.add_special_tokens = True
 
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_dir,
-                                                       legacy=False,
-                                                       padding_side='left',
                                                        trust_remote_code=True)
         if isinstance(self.tokenizer, T5Tokenizer):
             self.tokenizer_bos_id = self.tokenizer.sp_model.bos_id()
@@ -91,10 +98,27 @@ class TritonPythonModel:
         self.tokenizer_pad_id = self.tokenizer.encode(
             self.tokenizer.pad_token, add_special_tokens=False)[0]
 
+        with open(os.path.join(gpt_model_path, 'config.json'), 'r') as f:
+            gpt_model_config = json.load(f)
+        self.vocab_size = gpt_model_config['pretrained_config']['vocab_size']
+        
+        self.stream = torch.cuda.current_stream()
+
+        with open(vit_model_path, 'rb') as f:
+            vit_buffer = f.read()
+        self.visual_runtime = trt.Runtime(trt.Logger(trt.Logger.WARNING))
+        if vit_buffer is not None:
+            self.visual_engine = self.visual_runtime.deserialize_cuda_engine(vit_buffer)
+        self.visual_context = self.visual_engine.create_execution_context()
+        self.visual_context.set_optimization_profile_async(0, self.stream.cuda_stream)
+        
+        # self.vit_session = Session.from_serialized_engine(vit_buffer)
+
+
         # Parse model output configs and convert Triton types to numpy types
         output_names = [
             "INPUT_ID", "REQUEST_INPUT_LEN", "BAD_WORDS_IDS", "STOP_WORDS_IDS",
-            "OUT_END_ID", "OUT_PAD_ID"
+            "OUT_END_ID", "OUT_PAD_ID", "prompt_embedding_table", "prompt_vocab_size"
         ]
         input_names = ["EMBEDDING_BIAS_WORDS", "EMBEDDING_BIAS_WEIGHTS"]
         for input_name in input_names:
@@ -156,6 +180,21 @@ class TritonPythonModel:
             request_output_len = pb_utils.get_input_tensor_by_name(
                 request, 'REQUEST_OUTPUT_LEN').as_numpy()
 
+            image = pb_utils.get_input_tensor_by_name(request,
+                                                      'IMAGE').as_numpy()
+            
+            if image.shape[0] != 1:
+
+                err_str = "Inflight batching backend expects requests with batch size of 1."
+                logger.log_error(err_str)
+                responses.append(
+                    pb_utils.InferenceResponse(
+                        output_tensors=[],
+                        error=pb_utils.TritonError(err_str)))
+                continue
+
+            image_tensor = torch.from_numpy(image).half().to('cuda')
+
             bad_words_dict = pb_utils.get_input_tensor_by_name(
                 request, 'BAD_WORDS_DICT')
             if bad_words_dict is not None:
@@ -191,9 +230,28 @@ class TritonPythonModel:
                 pad_id = pad_id.as_numpy()
             else:
                 pad_id = [[self.tokenizer_pad_id]]
+            assert self.visual_engine.get_tensor_dtype('input') == trt.float16, "Please use the model built in examples/multimodal."
+            assert self.visual_context.set_input_shape('input', image_tensor.shape), "Image has wrong shape."
+            self.visual_context.set_tensor_address('input', image_tensor.data_ptr())
+
+            assert self.visual_engine.num_io_tensors == 2, "Please use the model built in examples/multimodal."
+            visual_output_shape = self.visual_context.get_tensor_shape('output')
+            assert self.visual_engine.get_tensor_dtype('output') == trt.float16, "Please use the model built in examples/multimodal."
+            visual_output = torch.empty(tuple(visual_output_shape),
+                                    dtype=torch.float16,
+                                    device=image_tensor.device)
+            self.visual_context.set_tensor_address('output', visual_output.data_ptr())
+
+            ok = self.visual_context.execute_async_v3(self.stream.cuda_stream)
+            assert ok, "Runtime execution failed for vision encoder model"
+            self.stream.synchronize()
+            prompt_table = visual_output
+            prompt_vocab_size = np.array([[prompt_table.shape[1]]])
+            prompt_table = prompt_table.to('cpu').numpy()
 
             # Preprocessing input data.
-            input_id, request_input_len = self._create_request(query)
+            input_id, request_input_len = self._create_request(query, prompt_table)
+            print(prompt_table)
             bad_words = self._to_word_list_format(bad_words_dict)
             stop_words = self._to_word_list_format(stop_words_dict)
 
@@ -219,11 +277,18 @@ class TritonPythonModel:
                                             np.array(end_id, dtype=np.int32))
             pad_id_tensor = pb_utils.Tensor('OUT_PAD_ID',
                                             np.array(pad_id, dtype=np.int32))
+            prompt_embedding_table_tensor = pb_utils.Tensor(
+                'prompt_embedding_table',
+                prompt_table.astype(self.prompt_embedding_table_dtype))
+            prompt_vocab_size_tensor = pb_utils.Tensor(
+                'prompt_vocab_size',
+                prompt_vocab_size.astype(self.prompt_vocab_size_dtype))
 
             inference_response = pb_utils.InferenceResponse(output_tensors=[
                 input_id_tensor, bad_words_ids_tensor, stop_words_ids_tensor,
                 request_input_len_tensor, request_output_len_tensor,
-                embedding_bias_tensor, end_id_tensor, pad_id_tensor
+                embedding_bias_tensor, end_id_tensor, pad_id_tensor,
+                prompt_embedding_table_tensor, prompt_vocab_size_tensor
             ])
             responses.append(inference_response)
 
@@ -238,7 +303,7 @@ class TritonPythonModel:
         """
         print('Cleaning up...')
 
-    def _create_request(self, query):
+    def _create_request(self, query, prompt_table):
         """
             query : batch string (2D numpy array)
         """
@@ -249,13 +314,41 @@ class TritonPythonModel:
                          ).astype(int) for s in query
             ]
         else:
-            start_ids = [
+            pre_prompts = []
+            post_prompts = []
+            for s in query:
+                parts = s[0].decode().split('<ImageHere>')
+                pre_prompt = parts[0]
+                post_prompt = parts[1]
+                pre_prompts.append(pre_prompt)
+                post_prompts.append(post_prompt)
+            
+            pre_input_ids = [
                 np.array(
                     self.tokenizer.encode(
-                        s[0].decode(),
-                        add_special_tokens=self.add_special_tokens)).astype(
-                            int) for s in query
+                        pre_prompt)).astype(
+                            int) for pre_prompt in pre_prompts
             ]
+
+            post_input_ids = [
+                np.array(
+                    self.tokenizer.encode(
+                        post_prompt)).astype(
+                            int) for post_prompt in post_prompts
+            ]
+
+        pre_ids = np.array(pre_input_ids)
+        post_ids = np.array(post_input_ids)
+        fake_prompt_ids = np.arange(
+            self.vocab_size,
+            self.vocab_size + prompt_table.shape[0] * prompt_table.shape[1])
+        fake_prompt_ids = np.reshape(
+            fake_prompt_ids, (prompt_table.shape[0], prompt_table.shape[1]))
+        start_ids = np.concatenate([pre_ids, fake_prompt_ids, post_ids],
+                                   axis=1).astype(int)
+        prompt_table = prompt_table.reshape(
+            (prompt_table.shape[0] * prompt_table.shape[1],
+             prompt_table.shape[2]))
         start_lengths = np.array([[len(ids)] for ids in start_ids]).astype(int)
 
         max_len = 0
