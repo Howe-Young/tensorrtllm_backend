@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="VcsDirectoryMappings">
+    <mapping directory="$PROJECT_DIR$" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/tensorrt_llm" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/tensorrt_llm/3rdparty/NVTX" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/tensorrt_llm/3rdparty/cutlass" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/tensorrt_llm/3rdparty/cxxopts" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/tensorrt_llm/3rdparty/json" vcs="Git" />
+  </component>
+</project>

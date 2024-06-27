@@ -87,6 +87,7 @@ def get_cmd(world_size, tritonserver, grpc_port, http_port, metrics_port,
         cmd += [
             f'--grpc-port={grpc_port}', f'--http-port={http_port}',
             f'--metrics-port={metrics_port}', '--disable-auto-complete-config',
+            # f'--backend-directory=/tmp/yanghao/tensorrtllm_backend/inflight_batcher_llm/build',
             f'--backend-config=python,shm-region-prefix-name=prefix{i}_', ':'
         ]
     return cmd
@@ -107,6 +108,8 @@ if __name__ == '__main__':
     cmd = get_cmd(int(args.world_size), args.tritonserver, args.grpc_port,
                   args.http_port, args.metrics_port, args.model_repo, args.log,
                   args.log_file, args.tensorrt_llm_model_name)
+    print('cmd: ', cmd)
+    # --backend-directory
     env = os.environ.copy()
     if args.multi_model:
         assert args.world_size == 1, 'World size must be 1 when using multi-model. Processes will be spawned automatically to run the multi-GPU models'

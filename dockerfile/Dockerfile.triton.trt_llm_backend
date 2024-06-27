@@ -25,8 +25,7 @@ ENV TRT_VERSION=$TRT_VER \
 LABEL TRT_VERSION $TRT_VER
 
 # Download & install internal TRT release
-RUN [ "$(uname -m)" != "x86_64" ] && arch="sbsa" || arch="x86_64" \
-    && curl -o /tmp/cuda-keyring.deb https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/$arch/cuda-keyring_1.0-1_all.deb \
+RUN curl -o /tmp/cuda-keyring.deb https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.0-1_all.deb \
     && apt install /tmp/cuda-keyring.deb \
     && rm /tmp/cuda-keyring.deb \
     && apt-get update -q=2 \
